@@ -1,68 +1,58 @@
+#Step2
+#Clumping
 library(data.table)
 library(dplyr)
 
-# Define directories
-pqtl_sig_dir <- "/BiO/hae/000005_MRSPI/00_pqtl_sig/"
-pqtl_clump_dir <- "/BiO/hae/000005_MRSPI/11_pqtl_sig_clump/"
-output_dir <- "/BiO/hae/000005_MRSPI/22_pqtl_sig_clump_QC/"
+# Load 1000G reference BIM file once
+root_bim <- fread("/BiO/hae/000006_ref_1000G/all_bim.txt.v2")
 
-# Create output directory if it doesn't exist
-if (!dir.exists(output_dir)) dir.create(output_dir)
+# Set paths
+pqtl_path <- "/BiO/hae/000005_MRSPI/00_pqtl_sig/"
+output_path <- "/BiO/hae/000005_MRSPI/11_pqtl_sig_clump/"
+plink_path <- "plink"
+ref_data <- "/BiO/hae/000006_ref_1000G/ref"
 
-# List all pQTL sig and clump files
-pqtl_sig_files <- list.files(pqtl_sig_dir, pattern = "_sig.tsv$", full.names = TRUE)
-pqtl_clump_files <- list.files(pqtl_clump_dir, pattern = "_sig_sig.txt$", full.names = TRUE)
+# Create output directory if not exists
+if (!dir.exists(output_path)) dir.create(output_path)
 
-# Process each file
-for (pqtl_sig_file in pqtl_sig_files) {
-  file_base <- tools::file_path_sans_ext(basename(pqtl_sig_file))
-  clump_file <- pqtl_clump_files[grepl(file_base, pqtl_clump_files)]
+# List all pqtl files
+pqtl_files <- list.files(pqtl_path, pattern = "\\.tsv$", full.names = TRUE)
+
+# Loop through each pqtl file
+for (pqtl_file in pqtl_files) {
+  pqtl_sig <- fread(pqtl_file)
+  pqtl_sig$original <- sub("(:[^:]+){2}$", "", pqtl_sig$ID)
   
-  if (length(clump_file) == 0) next
+  merged_data <- left_join(pqtl_sig, root_bim, by = "original")
+  clumping_input <- merged_data[, c("CHROM", "V2", "GENPOS", "ALLELE0", "ALLELE1", "P", "BETA", "SE")]
+  colnames(clumping_input) <- c("CHR", "SNP", "BP", "A1", "A2", "P", "BETA", "SE")
+  clumping_input <- na.omit(clumping_input)
   
-  # Load data
-  pqtl <- fread(clump_file)
-  if (nrow(pqtl) == 0) {
-    cat("Skipping empty pqtl file:", clump_file, "\n")
-    next
+  file_base <- tools::file_path_sans_ext(basename(pqtl_file))
+  plink_input_path <- file.path(output_path, paste0(file_base, "_sig.txt"))
+  result_output_path <- file.path(output_path, paste0("result_", file_base, "_sig.txt"))
+
+  fwrite(clumping_input, plink_input_path, sep = "\t", quote = FALSE, row.names = FALSE)
+  
+  plink_command <- paste(plink_path,
+                         "--bfile", ref_data,
+                         "--clump", plink_input_path,
+                         "--clump-kb 1000",
+                         "--clump-r2 0.01",
+                         "--clump-p1 1",
+                         "--clump-p2 1",
+                         "--out", result_output_path)
+
+  system(plink_command)
+
+  clumped_file <- paste0(result_output_path, ".clumped")
+  
+  if (file.exists(clumped_file)) {
+    clumped_result <- fread(clumped_file)
+    fwrite(clumped_result, paste0(result_output_path, "_clumped.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
+    cat("Clumping completed for:", pqtl_file, "\n")
+  } else {
+    cat("No significant clumping results for:", pqtl_file, "\n")
   }
-  
-  pqtl_clump <- fread(clump_file)
-  if (nrow(pqtl_clump) == 0) {
-    cat("Skipping empty clump file:", clump_file, "\n")
-    next
-  }
-  
-  pqtl_clump_snp <- data.frame(SNP = pqtl_clump$SNP)
-  m <- left_join(pqtl_clump_snp, pqtl, by = 'SNP')
-  if (nrow(m) == 0) {
-    cat("No matching SNPs in:", file_base, "\n")
-    next
-  }
-  
-  pqtl_ori <- fread(pqtl_sig_file)
-  if (nrow(pqtl_ori) == 0) {
-    cat("Skipping empty original pqtl file:", pqtl_sig_file, "\n")
-    next
-  }
-
-  # Create SNP_ID for matching
-  pqtl_ori$SNP_ID <- paste0(pqtl_ori$CHROM, ":", pqtl_ori$GENPOS, ":", pqtl_ori$ALLELE0, ":", pqtl_ori$ALLELE1)
-  m$SNP_ID <- paste0(m$CHR, ":", m$BP, ":", m$A1, ":", m$A2)
-
-  # Match datasets
-  m_matched <- left_join(m, pqtl_ori, by = "SNP_ID")
-  if (nrow(m_matched) == 0) {
-    cat("No matched SNPs in:", file_base, "\n")
-    next
-  }
-
-  # Prepare MR data
-  mr_data <- m_matched %>% select(SNP, CHR, BP, A1 = ALLELE1, A2 = ALLELE0, BETA = BETA.x, SE = SE.x, P = P.x, A1FREQ)
-
-  # Save result
-  output_file <- paste0(output_dir, file_base, "_MR_ready.tsv")
-  fwrite(mr_data, output_file, sep = "\t", quote = FALSE, row.names = FALSE)
-  
-  cat("Processed:", file_base, "->", output_file, "\n")
 }
+
